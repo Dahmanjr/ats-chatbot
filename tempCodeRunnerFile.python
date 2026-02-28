@@ -1,0 +1,334 @@
+import streamlit as st
+import anthropic
+import pandas as pd
+import csv
+import io
+import os
+
+# ── Page config ───────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="CatBot – مدارس التكنولوجيا التطبيقية",
+    page_icon="🏫",
+    layout="wide",
+)
+
+# ── Global CSS ────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;600;700;800&display=swap');
+
+html, body, [class*="css"] { font-family: 'Cairo', sans-serif !important; direction: rtl; }
+#MainMenu, footer, header { visibility: hidden; }
+.stApp { background: #f5f7fa; }
+
+.hero {
+    background: linear-gradient(135deg, #0a3d1f 0%, #1a6b3c 50%, #27ae60 100%);
+    border-radius: 20px;
+    padding: 32px 40px;
+    margin-bottom: 20px;
+    text-align: center;
+    color: white;
+    box-shadow: 0 8px 32px rgba(26,107,60,0.35);
+}
+.hero h1 { margin: 0; font-size: 2rem; font-weight: 800; }
+.hero p  { margin: 10px 0 0; font-size: 1rem; opacity: 0.88; }
+.hero .badge {
+    display: inline-block;
+    background: rgba(255,255,255,0.2);
+    border: 1px solid rgba(255,255,255,0.3);
+    border-radius: 20px;
+    padding: 4px 14px;
+    font-size: 0.8rem;
+    margin-top: 10px;
+}
+
+.stat-card {
+    background: white;
+    border-radius: 14px;
+    padding: 14px 16px;
+    text-align: center;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.07);
+    border-top: 3px solid #27ae60;
+    margin-bottom: 8px;
+}
+.stat-card .num { font-size: 1.8rem; font-weight: 800; color: #1a6b3c; line-height: 1; }
+.stat-card .lbl { font-size: 0.75rem; color: #666; margin-top: 4px; }
+
+.stButton > button {
+    background: white !important;
+    color: #1a6b3c !important;
+    border: 1.5px solid #c8e6c9 !important;
+    border-radius: 10px !important;
+    font-family: 'Cairo', sans-serif !important;
+    font-size: 0.82rem !important;
+    padding: 6px 10px !important;
+    text-align: right !important;
+    direction: rtl !important;
+    width: 100% !important;
+    transition: all 0.2s !important;
+}
+.stButton > button:hover {
+    background: #e8f5e9 !important;
+    border-color: #27ae60 !important;
+    color: #0a3d1f !important;
+}
+
+.stChatMessage { direction: rtl; text-align: right; }
+.stChatMessage p { line-height: 1.9; font-size: 0.97rem; }
+
+.stChatInput textarea {
+    direction: rtl !important;
+    text-align: right !important;
+    font-family: 'Cairo', sans-serif !important;
+    border-radius: 14px !important;
+}
+
+.welcome-card {
+    background: linear-gradient(135deg, #e8f5e9, #f1f8e9);
+    border: 1.5px solid #a5d6a7;
+    border-radius: 16px;
+    padding: 20px 24px;
+    margin-bottom: 16px;
+    text-align: right;
+    direction: rtl;
+}
+.welcome-card h3 { color: #1a6b3c; margin: 0 0 8px; font-size: 1.05rem; }
+.welcome-card p  { color: #2d5a27; margin: 0; font-size: 0.9rem; line-height: 1.7; }
+
+.sidebar-section {
+    background: #f9fafb;
+    border-radius: 12px;
+    padding: 14px;
+    margin-bottom: 14px;
+    border: 1px solid #ececec;
+}
+.sidebar-section h4 {
+    color: #1a6b3c;
+    margin: 0 0 10px;
+    font-size: 0.9rem;
+    font-weight: 700;
+    border-bottom: 2px solid #c8e6c9;
+    padding-bottom: 6px;
+}
+
+[data-testid="stSidebar"] { background: white !important; }
+</style>
+""", unsafe_allow_html=True)
+
+
+# ── CSV loader with robust fix ────────────────────────────────────────────────
+@st.cache_data
+def load_data():
+    try:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+    except NameError:
+        base_dir = os.getcwd()
+    csv_path = os.path.join(base_dir, "schools_data.csv")
+    with open(csv_path, encoding="utf-8-sig") as f:
+        content = f.read()
+
+    reader = csv.reader(io.StringIO(content))
+    header = next(reader)   # 12 columns
+    raw_rows = list(reader)
+
+    def fix_row(row):
+        if len(row) == 12:
+            return row
+        if len(row) <= 1:
+            return None
+        # First 8 cols and last 2 cols are stable; middle varies due to GPS coord split
+        prefix = row[:8]
+        suffix = row[-2:]
+        middle = row[8:-2]
+        if not middle:
+            return prefix + ["", ""] + list(suffix)
+        nataq = middle[-1]
+        map_parts = middle[:-1]
+        map_url = ",".join(
+            p for p in map_parts
+            if any(c in p for c in ["http", "maps", "goo.gl", ".", "0","1","2","3","4","5","6","7","8","9"])
+        )
+        if any(c in nataq for c in ["http", "maps.app"]):
+            map_url = (map_url + "," + nataq).strip(",")
+            nataq = ""
+        return prefix + [map_url, nataq] + list(suffix)
+
+    fixed = [r for row in raw_rows if (r := fix_row(row)) is not None]
+    return pd.DataFrame(fixed, columns=header)
+
+
+df = load_data()
+
+
+# ── System prompt ─────────────────────────────────────────────────────────────
+@st.cache_data
+def build_system_prompt(df: pd.DataFrame) -> str:
+    lines = []
+    for _, row in df.iterrows():
+        lines.append(
+            f"[{row['م']}] {row['اسم المدرسة']}\n"
+            f"  المحافظة: {row['المحافظة']} | المدينة: {row['المدينة']}\n"
+            f"  التخصصات: {row['التخصص']}\n"
+            f"  العنوان: {row['العنوان']}\n"
+            f"  نطاق القبول: {row['نطاق القبول']}\n"
+            f"  حالة المدرسة: {row['حالة المدرسة']}\n"
+            f"  داخل مصنع: {row['مدرسة داخل مصنع']}\n"
+            f"  رابط الخريطة: {row['رابط الخريطة']}\n"
+        )
+    return f"""أنت CatBot، مساعد ذكي متخصص في مدارس التكنولوجيا التطبيقية في مصر.
+
+قواعد العمل:
+- قبل الرد، تحقق دائماً من الإجابة ووجود البيانات في الجدول.
+- التزم بأسلوب رد رسمي واحترافي جداً باللغة العربية.
+- إذا سُئلت عن مدرسة، ابحث عن تخصصاتها، عنوانها، وحالة القبول بها (تقبل أو لا تقبل) بدقة.
+- لا تقدم معلومات من خارج الملف المرفق فيما يخص تفاصيل المدارس.
+- إذا طُلب منك قائمة بمدارس محافظة أو تخصص معين، اعرضها بشكل منظم مع الترقيم.
+- استخدم القوائم والجداول لتنظيم المعلومات عند الحاجة.
+- إذا لم تجد معلومة في البيانات، صرّح بذلك بوضوح.
+- عند ذكر رابط الخريطة، قدّمه للمستخدم.
+
+معلومات عامة:
+مدارس التكنولوجيا التطبيقية هي مدارس حكومية نموذجية تُدار بشراكة بين وزارة التربية والتعليم والقطاع الخاص.
+يحصل الخريج على 3 شهادات: إتمام الدراسة + تدريب صناعي + شهادة دولية معتمدة.
+بدأت عام 2018 بـ3 مدارس ووصلت إلى 115+ مدرسة في 27 محافظة بحلول 2025/2026.
+
+شروط القبول:
+- خريج إعدادية عامة أو أزهرية | لا يزيد سنّه عن 18 سنة
+- ضمن النطاق الجغرافي للمدرسة | اجتياز اختبار إلكتروني ومقابلة شخصية
+
+مراحل التقديم: تسجيل إلكتروني ← تحديد الرغبات ← اختبار ← مقابلة ← إعلان القبول
+
+=== بيانات المدارس الكاملة ===
+
+{"".join(lines)}"""
+
+
+SYSTEM_PROMPT = build_system_prompt(df)
+
+
+# ── Anthropic client ──────────────────────────────────────────────────────────
+@st.cache_resource
+def get_client():
+    key = os.environ.get("ANTHROPIC_API_KEY") or st.secrets.get("ANTHROPIC_API_KEY", "")
+    return anthropic.Anthropic(api_key=key)
+
+
+client = get_client()
+
+
+# ── Session state ─────────────────────────────────────────────────────────────
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "pending" not in st.session_state:
+    st.session_state.pending = None
+
+
+# ── SIDEBAR ───────────────────────────────────────────────────────────────────
+with st.sidebar:
+    accepting = len(df[df["حالة المدرسة"].str.contains("تقبل", na=False)])
+
+    st.markdown(f"""
+    <div class="sidebar-section">
+        <h4>📊 إحصائيات</h4>
+        <div class="stat-card"><div class="num">{len(df)}</div><div class="lbl">إجمالي المدارس</div></div>
+        <div class="stat-card"><div class="num">{df['المحافظة'].nunique()}</div><div class="lbl">محافظة</div></div>
+        <div class="stat-card"><div class="num">{accepting}</div><div class="lbl">تقبل طلاباً الآن</div></div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown('<div class="sidebar-section"><h4>💡 أسئلة سريعة</h4>', unsafe_allow_html=True)
+    quick_qs = [
+        ("🏙️", "ما هي مدارس محافظة القاهرة؟"),
+        ("⚡", "ما هي مدارس تخصص الكهرباء؟"),
+        ("💻", "ما هي مدارس تكنولوجيا المعلومات والحاسبات؟"),
+        ("🚗", "ما هي مدارس تخصص صيانة السيارات؟"),
+        ("📋", "ما هي شروط الالتحاق بمدارس التكنولوجيا؟"),
+        ("🎓", "ما هي مدارس التكنولوجيا التطبيقية؟"),
+        ("📍", "ما هي مدارس الإسكندرية؟"),
+        ("🌾", "ما هي المدارس ذات التخصصات الزراعية؟"),
+        ("🏭", "ما هي المدارس الموجودة داخل مصانع؟"),
+    ]
+    for emoji, q in quick_qs:
+        if st.button(f"{emoji} {q}", key=f"qbtn_{q}"):
+            st.session_state.pending = q
+            st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="sidebar-section"><h4>🔍 بحث بالمحافظة</h4>', unsafe_allow_html=True)
+    govs_list = sorted(df["المحافظة"].dropna().unique().tolist())
+    selected_gov = st.selectbox("المحافظة", ["-- اختر --"] + govs_list, label_visibility="collapsed")
+    if selected_gov != "-- اختر --":
+        if st.button(f"ابحث عن مدارس {selected_gov}", use_container_width=True, key="gov_search"):
+            st.session_state.pending = f"ما هي المدارس الموجودة في محافظة {selected_gov}؟"
+            st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    if st.button("🗑️  مسح المحادثة", use_container_width=True, key="clear"):
+        st.session_state.messages = []
+        st.session_state.pending = None
+        st.rerun()
+
+
+# ── MAIN ──────────────────────────────────────────────────────────────────────
+st.markdown("""
+<div class="hero">
+    <h1>🏫 CatBot — مساعد مدارس التكنولوجيا التطبيقية</h1>
+    <p>اسألني عن أي مدرسة: تخصصاتها · عنوانها · نطاق القبول · حالة التسجيل</p>
+    <span class="badge">🟢 يعمل الآن · مدعوم بالذكاء الاصطناعي</span>
+</div>
+""", unsafe_allow_html=True)
+
+if not st.session_state.messages:
+    st.markdown("""
+    <div class="welcome-card">
+        <h3>👋 أهلاً بك في CatBot!</h3>
+        <p>
+        أنا مساعدك الذكي للتعرف على <strong>مدارس التكنولوجيا التطبيقية في مصر</strong>.<br>
+        يمكنني مساعدتك في البحث عن المدارس حسب: المحافظة · التخصص · العنوان · حالة القبول.<br>
+        استخدم الأسئلة السريعة في الشريط الجانبي أو اكتب سؤالك بحرية ⬇️
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+# Render history
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"], avatar="🧑‍💻" if msg["role"] == "user" else "🤖"):
+        st.markdown(msg["content"])
+
+
+def get_reply(messages_list):
+    response = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=1500,
+        system=SYSTEM_PROMPT,
+        messages=messages_list,
+    )
+    return response.content[0].text
+
+
+# Handle sidebar button presses
+if st.session_state.pending:
+    prompt = st.session_state.pending
+    st.session_state.pending = None
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user", avatar="🧑‍💻"):
+        st.markdown(prompt)
+    with st.chat_message("assistant", avatar="🤖"):
+        with st.spinner("🔍 جارٍ البحث في قاعدة البيانات..."):
+            api_msgs = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages]
+            reply = get_reply(api_msgs)
+        st.markdown(reply)
+    st.session_state.messages.append({"role": "assistant", "content": reply})
+    st.rerun()
+
+# Handle typed input
+if prompt := st.chat_input("✏️  اكتب سؤالك هنا… مثال: ما مدارس محافظة الجيزة؟"):
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user", avatar="🧑‍💻"):
+        st.markdown(prompt)
+    with st.chat_message("assistant", avatar="🤖"):
+        with st.spinner("🔍 جارٍ البحث في قاعدة البيانات..."):
+            api_msgs = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages]
+            reply = get_reply(api_msgs)
+        st.markdown(reply)
+    st.session_state.messages.append({"role": "assistant", "content": reply})
